@@ -1,0 +1,473 @@
+# -*- coding: utf-8 -*-
+"""
+12类字符级语种识别作业
+姓名：马远尔
+完成日期：2026-10-27
+
+一、任务与数据
+输入一句话，判断它属于哪种语言，共12类：
+ar阿拉伯语、en英语、es西班牙语、hi印地语、ja日语、ko韩语、
+pt葡萄牙语、ru俄语、th泰语、tr土耳其语、vi越南语、zh中文。
+
+使用老师提供的v12数据：
+train.csv 9600条（每类800），dev.csv 1200条（每类100），
+test.csv 1800条（每类150）。不需要重新运行老师的数据下载脚本。
+数据来源为课程脚本标注的Tatoeba，许可CC-BY 2.0 FR：
+https://tatoeba.org/ ；https://creativecommons.org/licenses/by/2.0/fr/
+使用数据时保留课程数据卡及来源署名。
+
+文本进行NFKC、小写化，保留Unicode字母和组合符号。
+只从训练集建立字符表，共3276项，含PAD=0、UNK=1。
+三份数据未发现归一化后完全相同文本重叠。
+
+二、实验配置与过程
+1. 字符编号 -> Embedding -> 特征提取 -> Linear输出12类logits。
+2. 最长40字符，Embedding维度64，隐藏宽度64，batch_size=64。
+3. Adam，学习率0.001，10轮；交叉熵直接接收logits。
+4. 先比较mean、MLP、CNN、LSTM，再围绕CNN单项改变组件。
+5. 使用seed42、43、44复测，按验证Macro-F1均值选结构。
+6. 每次保存验证Macro-F1最佳epoch，最终固定两层CNN测试全部三个种子。
+7. 正式训练和测试均由本人在本机运行；实现参考AI辅助整理的实验代码。
+实跑环境：Python3.14.6、PyTorch2.14.1、NumPy2.5.4、CPU2线程。
+
+三、首轮结构对比（seed42，均为最佳验证结果）
+模型        参数量      验证Macro-F1    训练及验证耗时
+mean        210444       92.96%          1.38秒
+mlp         214604       93.93%          1.55秒
+cnn         222796       97.60%         16.09秒
+lstm        243724       96.25%         15.96秒
+
+mean：Embedding有效字符平均后接Linear。
+mlp：平均向量后接Linear、ReLU、Linear，仍不保留字符顺序。
+cnn：Conv1d、ReLU、最大池化、Linear，提取局部字符模式。
+lstm：按顺序编码，使用最后有效状态分类。
+此轮只有一个种子，不能作为模型家族的普遍排名。
+
+四、CNN组件对照（三个种子合并）
+方案                 验证F1均值   标准差/百分点   参数量   平均耗时
+原CNN                 97.6513%       0.1356      222796    16.42秒
+两层CNN               97.8923%       0.3125      235148    30.63秒
+分类前Dropout=0.3     97.6353%       0.1353      222796    17.05秒
+Embedding后LayerNorm  97.6497%       0.5426      222924    17.35秒
+ReLU换GELU            97.5668%       0.0778      222796    17.56秒
+最大池化换平均池化    96.7420%       0.1467      222796    16.16秒
+
+每个变体相对原CNN只改一项。标准差均为总体口径。
+两层CNN验证均值提高约0.24个百分点，耗时约1.87倍且波动更大。
+按验证均值优先，选两层CNN；没有根据测试结果重新挑结构或种子。
+Dropout、LayerNorm和GELU在当前配置下没有提高均值，不代表其普遍无用。
+最大池化在三个配对种子中均优于平均池化，可能更利于保留显著局部线索。
+
+五、最终测试（固定两层CNN，同一份1800条测试数据）
+Seed    Accuracy    Macro-F1    Loss       错误数
+42      97.0000%    97.0000%    0.075037     54
+43      98.3889%    98.3934%    0.052748     29
+44      97.4444%    97.4521%    0.063240     46
+平均    97.6111%    97.6152%
+总体标准差分别为0.5791、0.5804个百分点。
+对应最佳验证epoch依次为9、10、10。
+
+六、错例与结论
+三次累计129次错误预测，西班牙语误判葡萄牙语28次，反向38次，
+合计66次，占错误预测51.16%。同一文本可能在不同种子重复出错。
+seed42中西班牙语召回率84.00%、精确率88.11%、F1为86.01%，
+说明总体分数较高时仍应检查各语种表现。
+
+本任务中两层CNN按三seed验证均值领先，最终平均测试Macro-F1为97.62%。
+更深模型和额外组件不保证收益，应同时比较效果、成本与随机波动。
+各结构参数量不同，也未分别充分调参，不声称普遍优越或统计显著。
+三次评估使用同一测试集，不是5400条独立文本，也不是模型集成。
+本实验不包含未知语种识别、外部数据泛化和部署推理延迟测试。
+测试用于最终验收，不继续据此调参。
+
+七、运行方法（只需本py文件、课程CSV和已安装的PyTorch）
+安装依赖：
+    python -m pip install torch numpy
+
+默认查找本文件旁的 data/langid/v12、data/v12 或 v12 目录。
+也可用 --data-dir 指向课程v12目录，参数放在audit/train/test之前。
+例：
+    python langid_homework.py --data-dir "/你的目录/v12" audit
+
+进入数据就位的目录后，复现命令：
+    python langid_homework.py audit
+    python langid_homework.py train --models mean,mlp,cnn,lstm --run-name core --epochs 10 --seeds 42
+    python langid_homework.py train --models cnn,cnn_deep,cnn_dropout,cnn_norm,cnn_gelu,cnn_mean --run-name layers --epochs 10 --seeds 42 43 44
+    python langid_homework.py test --checkpoint results/layers/cnn_deep/seed_42/best.pt
+    python langid_homework.py test --checkpoint results/layers/cnn_deep/seed_43/best.pt
+    python langid_homework.py test --checkpoint results/layers/cnn_deep/seed_44/best.pt
+
+程序自动生成字符表、逐轮日志、验证汇总、检查点和测试错例。
+同名run-name不覆盖已有结果。训练只读取train/dev；test单独执行。
+本文件顶部为真实实跑记录，下方为完整实现。
+"""
+import argparse
+import csv
+import hashlib
+import json
+import platform
+import random
+import statistics
+import sys
+import time
+import unicodedata
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_DATA = next((path for path in (ROOT / 'data' / 'langid' / 'v12', ROOT / 'data' / 'v12', ROOT / 'v12') if path.is_dir()), ROOT / 'data' / 'langid' / 'v12')
+LANGS = ['ar', 'en', 'es', 'hi', 'ja', 'ko', 'pt', 'ru', 'th', 'tr', 'vi', 'zh']
+# 消融实验：以 cnn 为参照，每个变体只更改表中的一项。
+VARIANTS = {
+    'mean': {'arch': 'mean'},
+    'mlp': {'arch': 'mlp'},
+    'cnn': {'arch': 'cnn'},
+    'lstm': {'arch': 'lstm'},
+    'cnn_deep': {'arch': 'cnn', 'depth': 2},
+    'cnn_dropout': {'arch': 'cnn', 'dropout': 0.3},
+    'cnn_norm': {'arch': 'cnn', 'layer_norm': True},
+    'cnn_gelu': {'arch': 'cnn', 'activation': 'gelu'},
+    'cnn_mean': {'arch': 'cnn', 'pool': 'mean'},
+}
+
+
+def normalize(text):
+    """与老师生成字符表时相同：NFKC、小写、保留字母和组合符号。"""
+    text = unicodedata.normalize('NFKC', text).lower()
+    return ''.join(ch for ch in text if unicodedata.category(ch)[0] in ('L', 'M'))
+
+
+def read_rows(path):
+    with Path(path).open(encoding='utf-8-sig', newline='') as file:
+        reader = csv.DictReader(file)
+        if reader.fieldnames != ['text', 'label']:
+            raise ValueError(f'{path}: 必须有 text,label 两列')
+        rows = [(normalize(row['text']), row['label']) for row in reader]
+    if not rows or any(not text or label not in LANGS for text, label in rows):
+        raise ValueError(f'{path}: 空文本、空集合或未知标签')
+    if set(label for _, label in rows) != set(LANGS):
+        raise ValueError(f'{path}: 并非完整12类数据')
+    return rows
+
+
+def fingerprint(data_dir, splits=('train', 'dev')):
+    digest = hashlib.sha256()
+    for split in splits:
+        digest.update(split.encode())
+        digest.update((data_dir / f'{split}.csv').read_bytes())
+    return digest.hexdigest()
+
+
+def make_vocab(rows):
+    counts = Counter(ch for text, _ in rows for ch in text)
+    vocab = {'<PAD>': 0, '<UNK>': 1}
+    for ch, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        vocab[ch] = len(vocab)
+    return vocab, counts
+
+
+def save_json(path, value):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def audit(data_dir):
+    rows = {split: read_rows(data_dir / f'{split}.csv') for split in ('train', 'dev', 'test')}
+    vocab, counts = make_vocab(rows['train'])
+    report = {'source': str(data_dir), 'splits': {}, 'overlaps': {}, 'vocab_size': len(vocab)}
+    for split, samples in rows.items():
+        lengths = [len(text) for text, _ in samples]
+        chars = [ch for text, _ in samples for ch in text]
+        report['splits'][split] = {
+            'rows': len(samples), 'labels': dict(sorted(Counter(label for _, label in samples).items())),
+            'normalized_duplicates': len(samples) - len(set(text for text, _ in samples)),
+            'min_length': min(lengths), 'max_length': max(lengths),
+            'unknown_char_rate': sum(ch not in vocab for ch in chars) / len(chars),
+        }
+    for left, right in [('train', 'dev'), ('train', 'test'), ('dev', 'test')]:
+        report['overlaps'][f'{left}/{right}'] = len(
+            {text for text, _ in rows[left]} & {text for text, _ in rows[right]})
+    report['all_splits_sha256'] = fingerprint(data_dir, ('train', 'dev', 'test'))
+    output = ROOT / 'generated'
+    save_json(output / 'audit.json', report)
+    save_json(output / 'vocab_v12.json', vocab)
+    with (output / 'vocab_v12.txt').open('w', encoding='utf-8') as file:
+        file.write('# 字符\tid\t出现次数\n')
+        for ch, index in vocab.items():
+            file.write(f'{ch}\t{index}\t{counts.get(ch, 0)}\n')
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f'已生成字符表和核验记录：{output}')
+    if any(report['overlaps'].values()):
+        raise ValueError('数据划分有重叠，应先排查再开始正式对比')
+
+
+def load_torch():
+    global torch, nn
+    try:
+        import torch
+        from torch import nn
+    except ImportError as error:
+        raise SystemExit('当前Python未安装PyTorch。请在当前环境执行 python -m pip install torch numpy。') from error
+
+
+def encode(rows, vocab, max_len):
+    """字符编号[B,L]；真实长度[B]；类别编号[B]。0补齐，1表示未见字符。"""
+    inputs = torch.zeros((len(rows), max_len), dtype=torch.long)
+    lengths = torch.zeros(len(rows), dtype=torch.long)
+    labels = torch.zeros(len(rows), dtype=torch.long)
+    for index, (text, label) in enumerate(rows):
+        ids = [vocab.get(ch, 1) for ch in text[:max_len]]
+        inputs[index, :len(ids)] = torch.tensor(ids)
+        lengths[index] = len(ids)
+        labels[index] = LANGS.index(label)
+    return torch.utils.data.TensorDataset(inputs, lengths, labels)
+
+
+def build_model(config, vocab_size):
+    """四条结构路线，共用Embedding、可选LayerNorm和12类分类头。"""
+    class LanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            dim, hidden = config['embed_dim'], config['hidden_dim']
+            self.embedding = nn.Embedding(vocab_size, dim, padding_idx=0)
+            self.norm = nn.LayerNorm(dim) if config['layer_norm'] else nn.Identity()
+            self.activation = nn.GELU() if config['activation'] == 'gelu' else nn.ReLU()
+            self.dropout = nn.Dropout(config['dropout'])
+            arch = config['arch']
+            if arch == 'mlp':
+                self.projection = nn.Linear(dim, hidden)
+            elif arch == 'cnn':
+                self.convs = nn.ModuleList([
+                    nn.Conv1d(dim if layer == 0 else hidden, hidden, kernel_size=3, padding=1)
+                    for layer in range(config['depth'])])
+            elif arch == 'lstm':
+                self.rnn = nn.LSTM(dim, hidden, batch_first=True)
+            self.classifier = nn.Linear(dim if arch == 'mean' else hidden, len(LANGS))
+
+        def forward(self, ids, lengths):
+            mask = ids.ne(0)  # True是真实字符，False是补齐位置。
+            features = self.norm(self.embedding(ids))  # [B,L,E]
+            features = features * mask.unsqueeze(-1)  # 归一化偏移也不能使PAD产生特征。
+            arch = config['arch']
+            if arch in ('mean', 'mlp'):
+                summary = features.sum(dim=1) / lengths.to(features.device).unsqueeze(1)
+                if arch == 'mlp':
+                    summary = self.activation(self.projection(summary))
+            elif arch == 'cnn':
+                features = features.transpose(1, 2)  # Conv1d要求[B,E,L]。
+                for conv in self.convs:
+                    features = self.activation(conv(features))
+                    features = features * mask.unsqueeze(1)
+                if config['pool'] == 'max':
+                    summary = features.masked_fill(~mask.unsqueeze(1), float('-inf')).amax(dim=2)
+                else:
+                    summary = features.sum(dim=2) / lengths.to(features.device).unsqueeze(1)
+            else:
+                packed = nn.utils.rnn.pack_padded_sequence(
+                    features, lengths.cpu(), batch_first=True, enforce_sorted=False)
+                _, (hidden, _) = self.rnn(packed)
+                summary = hidden[-1]  # 最后一个有效字符的状态，不是补齐末尾。
+            return self.classifier(self.dropout(summary))  # logits，不先做Softmax。
+    return LanguageModel()
+
+
+def classification_metrics(confusion):
+    """混淆矩阵行=真实类别，列=预测类别。无sklearn依赖。"""
+    n = len(LANGS)
+    total = sum(map(sum, confusion))
+    per_class = {}
+    for index, label in enumerate(LANGS):
+        tp = confusion[index][index]
+        support = sum(confusion[index])
+        predicted = sum(confusion[row][index] for row in range(n))
+        precision = tp / predicted if predicted else 0.0
+        recall = tp / support if support else 0.0
+        f1 = 2 * tp / (support + predicted) if support + predicted else 0.0
+        per_class[label] = {'precision': precision, 'recall': recall, 'f1': f1, 'support': support}
+    return {'accuracy': sum(confusion[i][i] for i in range(n)) / total,
+            'macro_f1': statistics.mean(item['f1'] for item in per_class.values()),
+            'per_class': per_class, 'confusion_matrix': confusion}
+
+
+def evaluate(model, loader, device):
+    model.eval()
+    confusion = [[0] * len(LANGS) for _ in LANGS]
+    total_loss, total = 0.0, 0
+    mistakes = []
+    with torch.no_grad():
+        for ids, lengths, labels in loader:
+            logits = model(ids.to(device), lengths)
+            total_loss += nn.functional.cross_entropy(logits, labels.to(device), reduction='sum').item()
+            predictions = logits.argmax(dim=1).cpu().tolist()
+            for gold, pred in zip(labels.tolist(), predictions):
+                confusion[gold][pred] += 1
+                mistakes.append(pred)
+            total += len(labels)
+    result = classification_metrics(confusion)
+    result['loss'] = total_loss / total
+    return result, mistakes
+
+
+def train_one(args, name, seed, train_rows, dev_rows, vocab):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    config = {'arch': 'mean', 'embed_dim': args.embed_dim, 'hidden_dim': args.hidden_dim,
+              'depth': 1, 'dropout': 0.0, 'layer_norm': False, 'activation': 'relu',
+              'pool': 'max', 'max_len': args.max_len}
+    config.update(VARIANTS[name])
+    output = ROOT / 'results' / args.run_name / name / f'seed_{seed}'
+    if output.exists():
+        raise ValueError(f'{output} 已存在，请换一个 --run-name，避免覆盖实验')
+    output.mkdir(parents=True)
+    generator = torch.Generator().manual_seed(seed)
+    train_loader = torch.utils.data.DataLoader(
+        encode(train_rows, vocab, args.max_len), batch_size=args.batch_size,
+        shuffle=True, generator=generator)
+    dev_loader = torch.utils.data.DataLoader(
+        encode(dev_rows, vocab, args.max_len), batch_size=args.batch_size)
+    device = torch.device(args.device)
+    model = build_model(config, len(vocab)).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    metadata = {'model': name, 'seed': seed, 'config': config,
+                'learning_rate': args.lr, 'batch_size': args.batch_size, 'epochs': args.epochs,
+                'parameters': sum(parameter.numel() for parameter in model.parameters()),
+                'torch_version': str(torch.__version__), 'python_version': platform.python_version(),
+                'device': str(device), 'threads': args.threads,
+                'train_dev_sha256': fingerprint(args.data_dir), 'selection_metric': 'dev_macro_f1'}
+    save_json(output / 'config.json', metadata)
+    history, best_f1, best_epoch = [], -1.0, 0
+    started = time.perf_counter()
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        total_loss, total_correct, total = 0.0, 0, 0
+        for ids, lengths, labels in train_loader:
+            ids, labels = ids.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits = model(ids, lengths)
+            loss = nn.functional.cross_entropy(logits, labels)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * len(labels)
+            total_correct += (logits.argmax(dim=1) == labels).sum().item()
+            total += len(labels)
+        dev, _ = evaluate(model, dev_loader, device)
+        row = {'epoch': epoch, 'train_loss': total_loss / total, 'train_accuracy': total_correct / total,
+               'dev_loss': dev['loss'], 'dev_accuracy': dev['accuracy'], 'dev_macro_f1': dev['macro_f1']}
+        history.append(row)
+        if dev['macro_f1'] > best_f1:
+            best_f1, best_epoch = dev['macro_f1'], epoch
+            torch.save({'state_dict': {key: value.detach().cpu().clone()
+                                      for key, value in model.state_dict().items()},
+                        'config': config, 'vocab': vocab, 'labels': LANGS,
+                        'metadata': metadata, 'best_epoch': epoch, 'dev_metrics': dev}, output / 'best.pt')
+        print(f'{name} seed={seed} epoch={epoch:02d} loss={row["train_loss"]:.4f} '
+              f'dev_acc={dev["accuracy"]:.4f} dev_f1={dev["macro_f1"]:.4f}', flush=True)
+        save_json(output / 'history.json', history)
+    best = history[best_epoch - 1]
+    summary = {**metadata, 'best_epoch': best_epoch, 'dev_accuracy': best['dev_accuracy'],
+               'dev_macro_f1': best_f1, 'seconds': time.perf_counter() - started,
+               'checkpoint': str(output / 'best.pt')}
+    save_json(output / 'summary.json', summary)
+    return summary
+
+
+def run_training(args):
+    load_torch()
+    torch.set_num_threads(args.threads)
+    torch.use_deterministic_algorithms(True)
+    train_rows = read_rows(args.data_dir / 'train.csv')
+    dev_rows = read_rows(args.data_dir / 'dev.csv')
+    if {text for text, _ in train_rows} & {text for text, _ in dev_rows}:
+        raise ValueError('训练和验证集存在相同文本')
+    vocab, _ = make_vocab(train_rows)
+    names = args.models.split(',')
+    if any(name not in VARIANTS for name in names) or len(set(names)) != len(names):
+        raise ValueError(f'模型名称必须唯一并属于 {list(VARIANTS)}')
+    if not args.run_name or Path(args.run_name).name != args.run_name or args.run_name in ('.', '..'):
+        raise ValueError('run-name必须是一个目录名')
+    summaries = []
+    for name in names:
+        for seed in args.seeds:
+            summaries.append(train_one(args, name, seed, train_rows, dev_rows, vocab))
+    table = []
+    for name in names:
+        runs = [row for row in summaries if row['model'] == name]
+        values = [row['dev_macro_f1'] for row in runs]
+        table.append({'model': name, 'seeds': len(values), 'parameters': runs[0]['parameters'],
+                      'dev_f1_mean': statistics.mean(values), 'dev_f1_std': statistics.pstdev(values),
+                      'seconds_mean': statistics.mean(row['seconds'] for row in runs)})
+    destination = ROOT / 'results' / args.run_name
+    save_json(destination / 'comparison.json', table)
+    with (destination / 'comparison.csv').open('w', encoding='utf-8-sig', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=list(table[0]))
+        writer.writeheader()
+        writer.writerows(table)
+    print(json.dumps(table, ensure_ascii=False, indent=2))
+    print('只比较了验证集。根据完整seed组结果选择结构，再单独执行test。')
+
+
+def run_test(args):
+    load_torch()
+    torch.set_num_threads(args.threads)
+    output = args.checkpoint.parent
+    if (output / 'test_metrics.json').exists():
+        raise ValueError('该检查点已有测试记录。请阅读已有结果，不要反复按测试集调参。')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
+    if checkpoint['labels'] != LANGS or fingerprint(args.data_dir) != checkpoint['metadata']['train_dev_sha256']:
+        raise ValueError('数据版本或标签顺序与训练记录不一致')
+    model = build_model(checkpoint['config'], len(checkpoint['vocab']))
+    model.load_state_dict(checkpoint['state_dict'])
+    rows = read_rows(args.data_dir / 'test.csv')
+    loader = torch.utils.data.DataLoader(
+        encode(rows, checkpoint['vocab'], checkpoint['config']['max_len']), batch_size=64)
+    metrics, predictions = evaluate(model, loader, torch.device('cpu'))
+    metrics['test_sha256'] = fingerprint(args.data_dir, ('test',))
+    save_json(output / 'test_metrics.json', metrics)
+    with (output / 'test_errors.csv').open('w', encoding='utf-8-sig', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['normalized_text', 'true_label', 'predicted_label'])
+        for (text, label), pred in zip(rows, predictions):
+            if label != LANGS[pred]:
+                writer.writerow([text, label, LANGS[pred]])
+    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description='12类字符级语种识别训练与测试，实验过程和结果见文件顶部。')
+    parser.add_argument('--data-dir', type=Path, default=DEFAULT_DATA)
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('audit', help='检查CSV并只从训练集生成字符表，无需torch')
+    train = sub.add_parser('train', help='训练结构对比和消融，仅使用train/dev')
+    train.add_argument('--models', default='mean', help=','.join(VARIANTS))
+    train.add_argument('--run-name', default=datetime.now().strftime('%Y%m%d_%H%M%S'))
+    train.add_argument('--epochs', type=int, default=10)
+    train.add_argument('--batch-size', type=int, default=64)
+    train.add_argument('--embed-dim', type=int, default=64)
+    train.add_argument('--hidden-dim', type=int, default=64)
+    train.add_argument('--max-len', type=int, default=40)
+    train.add_argument('--lr', type=float, default=0.001)
+    train.add_argument('--seeds', type=int, nargs='+', default=[42])
+    train.add_argument('--device', choices=['cpu'], default='cpu', help='教学版固定CPU便于复现')
+    train.add_argument('--threads', type=int, default=2)
+    test = sub.add_parser('test', help='选定方案后，单独运行最终测试')
+    test.add_argument('--checkpoint', type=Path, required=True)
+    test.add_argument('--threads', type=int, default=2)
+    args = parser.parse_args()
+    if args.command == 'audit':
+        audit(args.data_dir)
+    elif args.command == 'train':
+        if min(args.epochs, args.batch_size, args.embed_dim, args.hidden_dim, args.max_len, args.threads) < 1 or args.lr <= 0:
+            parser.error('维度、轮数、批量、线程数和学习率必须为正')
+        if len(set(args.seeds)) != len(args.seeds):
+            parser.error('随机种子不可重复')
+        run_training(args)
+    else:
+        if args.threads < 1:
+            parser.error('线程数必须为正')
+        run_test(args)
+
+
+if __name__ == '__main__':
+    main()
+
